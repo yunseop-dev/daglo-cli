@@ -15,7 +15,9 @@ import {
 } from "../utils/file.js";
 import {
   buildPlainTextFromTokens,
+  collectKaraokeTokens,
   extractKaraokeTokens,
+  KaraokeToken,
   splitTokensByPunctuation,
 } from "../utils/karaoke.js";
 import { buildUrl, parseResponseBody } from "../utils/http.js";
@@ -448,6 +450,75 @@ export const getLatestBoardContent = async (
   };
 };
 
+const fetchAllScriptPages = async (
+  client: DagloApiClient,
+  fileMetaId: string,
+  limit = 60
+): Promise<Record<string, unknown>[] | null> => {
+  const scripts: Record<string, unknown>[] = [];
+  const firstUrl = buildUrl(client.baseUrl, `/file-meta/${fileMetaId}/script`, {
+    limit,
+    page: 0,
+  });
+  const firstResponse = await client.request(firstUrl);
+
+  if (!firstResponse.ok) {
+    return null;
+  }
+
+  const firstPayload = (await parseResponseBody(firstResponse)) as {
+    item?: string;
+    meta?: { totalPages?: number };
+  };
+  const firstScript = decodeScriptItem(firstPayload?.item);
+  if (firstScript) {
+    scripts.push(firstScript);
+  }
+
+  const totalPages = firstPayload?.meta?.totalPages ?? 1;
+  for (let page = 1; page < totalPages; page += 1) {
+    const pageUrl = buildUrl(client.baseUrl, `/file-meta/${fileMetaId}/script`, {
+      limit,
+      page,
+    });
+    const pageResponse = await client.request(pageUrl);
+
+    if (!pageResponse.ok) {
+      throw new Error(`Failed to fetch script page ${page}: ${pageResponse.statusText}`);
+    }
+
+    const pagePayload = (await parseResponseBody(pageResponse)) as { item?: string };
+    const pageScript = decodeScriptItem(pagePayload?.item);
+    if (pageScript) {
+      scripts.push(pageScript);
+    }
+  }
+
+  return scripts;
+};
+
+const extractTokensFromScripts = (scripts: Record<string, unknown>[]) => {
+  const tokens: KaraokeToken[] = [];
+
+  scripts.forEach((script) => {
+    const editorState = script.editorState as Record<string, unknown> | undefined;
+
+    if (editorState?.root) {
+      collectKaraokeTokens(editorState.root, tokens);
+      return;
+    }
+
+    if (editorState) {
+      collectKaraokeTokens(editorState, tokens);
+      return;
+    }
+
+    collectKaraokeTokens(script, tokens);
+  });
+
+  return tokens;
+};
+
 export const exportBoardContent = async (
   client: DagloApiClient,
   args: ExportBoardContentArgs
@@ -489,26 +560,14 @@ export const exportBoardContent = async (
   detailParams.append("includeContent", "true");
 
   let rawContent: string | undefined;
+  let scriptTokens: KaraokeToken[] = [];
   let contentSource = "board";
 
   if (targetFileMetaId) {
-    const scriptResponse = await client.request(
-      `/file-meta/${targetFileMetaId}/script?${detailParams.toString()}`
-    );
+    const scripts = await fetchAllScriptPages(client, targetFileMetaId);
 
-    if (scriptResponse.ok) {
-      const scriptData = (await scriptResponse.json()) as
-        | { content?: string; script?: string; text?: string; item?: string }
-        | string;
-      if (typeof scriptData === "string") {
-        rawContent = scriptData;
-      } else {
-        rawContent =
-          scriptData.content ??
-          scriptData.script ??
-          scriptData.text ??
-          scriptData.item;
-      }
+    if (scripts) {
+      scriptTokens = extractTokensFromScripts(scripts);
       contentSource = "file-meta";
     }
   }
@@ -537,7 +596,8 @@ export const exportBoardContent = async (
   }
 
   const normalizedContent = rawContent ? normalizeScriptContent(rawContent) : "";
-  const tokens = extractKaraokeTokens(normalizedContent);
+  const tokens =
+    scriptTokens.length > 0 ? scriptTokens : extractKaraokeTokens(normalizedContent);
 
   if (args.format === "punctuation-json") {
     const segments = splitTokensByPunctuation(tokens);

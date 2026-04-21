@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { deflateSync } from "node:zlib";
 import { DagloApiClient } from "../api/client.js";
 import {
   listBoards,
@@ -14,6 +15,9 @@ import {
 } from "./boards.js";
 
 global.fetch = vi.fn() as any;
+
+const encodeScriptItem = (value: unknown) =>
+  deflateSync(Buffer.from(JSON.stringify(value), "utf8")).toString("base64");
 
 describe("listBoards", () => {
   beforeEach(() => vi.clearAllMocks());
@@ -337,6 +341,83 @@ describe("exportBoardContent", () => {
 
     expect(result).toMatchObject({ outputPath: tmpFile, contentSource: "board" });
     expect(fs.existsSync(tmpFile)).toBe(true);
+  });
+
+  it("exports full text across all script pages when fileMetaId is present", async () => {
+    const listPayload = {
+      items: [
+        {
+          id: "b1",
+          name: "Board",
+          createdAt: "2024-01-01",
+          fileMetaId: "fm1",
+        },
+      ],
+    };
+    const firstPageScript = {
+      editorState: {
+        root: {
+          children: [
+            {
+              children: [
+                { type: "karaoke", text: "Hello ", s: 0, e: 0.5 },
+                { type: "karaoke", text: "world.", s: 0.5, e: 1 },
+              ],
+            },
+          ],
+        },
+      },
+    };
+    const secondPageScript = {
+      editorState: {
+        root: {
+          children: [
+            {
+              children: [
+                { type: "karaoke", text: " Goodbye", s: 1, e: 1.5 },
+                { type: "karaoke", text: ".", s: 1.5, e: 2 },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    (global.fetch as any)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => listPayload,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          item: encodeScriptItem(firstPageScript),
+          meta: { totalPages: 2 },
+        }),
+        text: async () =>
+          JSON.stringify({
+            item: encodeScriptItem(firstPageScript),
+            meta: { totalPages: 2 },
+          }),
+        headers: { get: () => "application/json" },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ item: encodeScriptItem(secondPageScript) }),
+        text: async () => JSON.stringify({ item: encodeScriptItem(secondPageScript) }),
+        headers: { get: () => "application/json" },
+      });
+
+    const client = new DagloApiClient();
+    const result = await exportBoardContent(client, {
+      format: "text",
+      outputPath: tmpFile,
+    });
+
+    expect(result).toMatchObject({ outputPath: tmpFile, contentSource: "file-meta" });
+    expect(fs.readFileSync(tmpFile, "utf8")).toBe("Hello world. Goodbye.");
+    expect((global.fetch as any).mock.calls[1][0]).toContain("/file-meta/fm1/script");
+    expect((global.fetch as any).mock.calls[2][0]).toContain("page=1");
   });
 
   it("exports punctuation-json format with boardId", async () => {
