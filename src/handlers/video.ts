@@ -7,6 +7,11 @@ import { decodeScriptItem } from "../utils/content.js";
 import { buildUrl, parseResponseBody } from "../utils/http.js";
 import { KaraokeToken } from "../utils/karaoke.js";
 import {
+  normalizeSubtitleSegments,
+  segmentSubtitleCues,
+  serializeSubtitleCues,
+} from "../utils/subtitles.js";
+import {
   CreateYoutubeHighlightClipArgs,
   CreateYoutubeFullSubtitledVideoArgs,
 } from "../schemas/video.js";
@@ -122,6 +127,161 @@ const extractYouTubeId = (url: string): string | null => {
   }
 
   return null;
+};
+
+const isDagloShareUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.replace(/^www\./, "");
+    return hostname.endsWith("daglo.ai") && parsed.pathname.startsWith("/share/");
+  } catch {
+    return false;
+  }
+};
+
+const isAllowedYouTubeUrl = (value: string): boolean => {
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.replace(/^www\./, "");
+
+    if (hostname === "youtu.be") {
+      return extractYouTubeId(value) !== null;
+    }
+
+    if (!hostname.endsWith("youtube.com")) {
+      return false;
+    }
+
+    if (parsed.pathname === "/watch" || parsed.pathname === "/watch/") {
+      return extractYouTubeId(value) !== null;
+    }
+
+    if (parsed.pathname.startsWith("/shorts/") || parsed.pathname.startsWith("/live/")) {
+      return extractYouTubeId(value) !== null;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+const sortYouTubeUrlCandidates = (candidates: Iterable<string>): string[] => {
+  return Array.from(candidates).sort((left, right) => {
+    const leftId = extractYouTubeId(left) ?? left;
+    const rightId = extractYouTubeId(right) ?? right;
+
+    if (leftId !== rightId) {
+      return leftId.localeCompare(rightId);
+    }
+
+    return left.localeCompare(right);
+  });
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+};
+
+const collectYouTubeUrlCandidates = (
+  value: unknown,
+  candidates: Set<string>,
+  parsedJsonStrings: Set<string> = new Set<string>()
+): void => {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return;
+
+    if (!isDagloShareUrl(trimmed) && isAllowedYouTubeUrl(trimmed)) {
+      candidates.add(trimmed);
+      return;
+    }
+
+    if (parsedJsonStrings.has(trimmed)) {
+      return;
+    }
+    parsedJsonStrings.add(trimmed);
+
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (parsed !== trimmed) {
+        collectYouTubeUrlCandidates(parsed, candidates, parsedJsonStrings);
+      }
+    } catch {
+      // not JSON, ignore
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectYouTubeUrlCandidates(item, candidates, parsedJsonStrings);
+    }
+    return;
+  }
+
+  if (isRecord(value)) {
+    for (const nestedValue of Object.values(value)) {
+      collectYouTubeUrlCandidates(nestedValue, candidates, parsedJsonStrings);
+    }
+  }
+};
+
+const resolveSingleYouTubeUrl = (value: unknown, boardId: string): string | undefined => {
+  const candidates = new Set<string>();
+  collectYouTubeUrlCandidates(value, candidates);
+  const youtubeUrls = sortYouTubeUrlCandidates(candidates);
+
+  if (youtubeUrls.length === 0) {
+    return undefined;
+  }
+
+  if (youtubeUrls.length > 1) {
+    throw new Error(
+      `Multiple YouTube URLs found for board ${boardId}: ${youtubeUrls.join(", ")}`
+    );
+  }
+
+  return youtubeUrls[0];
+};
+
+export const resolveBoardDerivedVideoSource = async (
+  client: DagloApiClient,
+  boardId: string,
+  options?: { skipYoutubeUrlResolve?: boolean }
+): Promise<{ fileMetaId: string; youtubeUrl?: string }> => {
+  const boardUrl = buildUrl(client.baseUrl, `/boards/${boardId}`);
+  const boardResponse = await client.request(boardUrl);
+  if (!boardResponse.ok) {
+    throw new Error(`Failed to fetch board: ${boardResponse.statusText}`);
+  }
+
+  const boardData = (await parseResponseBody(boardResponse)) as {
+    fileMetaId?: string;
+    fileMeta?: Array<{ id?: string }>;
+  } & Record<string, unknown>;
+
+  const fileMetaId =
+    boardData.fileMetaId ||
+    (Array.isArray(boardData.fileMeta) ? boardData.fileMeta[0]?.id : undefined);
+
+  if (!fileMetaId) {
+    throw new Error("Could not determine fileMetaId from boardId.");
+  }
+
+  if (options?.skipYoutubeUrlResolve) {
+    return { fileMetaId };
+  }
+
+  const youtubeUrl = resolveSingleYouTubeUrl(boardData, boardId);
+  if (!youtubeUrl) {
+    throw new Error(`No YouTube URL found for board ${boardId}.`);
+  }
+
+  return {
+    fileMetaId,
+    youtubeUrl,
+  };
 };
 
 const applyTimeScale = (segments: ScriptSegment[], scale: number): ScriptSegment[] => {
@@ -417,23 +577,108 @@ const generateSrt = (
   clipStartTime: number,
   maxSegmentChars: number
 ): string => {
-  let srtContent = "";
-  let subtitleIndex = 1;
+  const cues = segmentSubtitleCues(
+    segments.map((segment) => ({
+      text: segment.text,
+      startSec: segment.startTime,
+      endSec: segment.endTime,
+      speakerKey: null,
+      speakerLabel: null,
+      raw: segment,
+    })),
+    { maxLineChars: maxSegmentChars }
+  );
 
-  const constrainedSegments = splitSegmentsByMaxChars(segments, maxSegmentChars);
+  return serializeSubtitleCues(cues, clipStartTime);
+};
 
-  for (const segment of constrainedSegments) {
-    const adjustedStart = Math.max(0, segment.startTime - clipStartTime);
-    const adjustedEnd = Math.max(0, segment.endTime - clipStartTime);
-    if (adjustedEnd <= adjustedStart) continue;
+const resolveBoardInputs = async (
+  client: DagloApiClient,
+  args: CreateYoutubeFullSubtitledVideoArgs
+): Promise<{ fileMetaId: string; boardYoutubeUrl?: string }> => {
+  let fileMetaId = args.fileMetaId;
+  let boardYoutubeUrl: string | undefined;
 
-    srtContent += `${subtitleIndex}\n`;
-    srtContent += `${formatTimestamp(adjustedStart)} --> ${formatTimestamp(adjustedEnd)}\n`;
-    srtContent += `${wrapSubtitleText(segment.text, maxSegmentChars)}\n\n`;
-    subtitleIndex += 1;
+  if (!fileMetaId && args.boardId) {
+    const resolvedSource = await resolveBoardDerivedVideoSource(client, args.boardId, {
+      skipYoutubeUrlResolve: Boolean(args.youtubeUrl),
+    });
+    fileMetaId = resolvedSource.fileMetaId;
+    if (!args.youtubeUrl && resolvedSource.youtubeUrl) {
+      boardYoutubeUrl = resolvedSource.youtubeUrl;
+    }
   }
 
-  return srtContent;
+  if (!fileMetaId) {
+    throw new Error("Could not determine fileMetaId from boardId.");
+  }
+
+  return { fileMetaId, boardYoutubeUrl };
+};
+
+const fetchAllScriptPages = async (
+  client: DagloApiClient,
+  fileMetaId: string,
+  limit = 60
+): Promise<unknown[]> => {
+  const scripts: unknown[] = [];
+  const firstUrl = buildUrl(client.baseUrl, `/file-meta/${fileMetaId}/script`, {
+    limit,
+    page: 0,
+  });
+  const firstResponse = await client.request(firstUrl);
+
+  if (!firstResponse.ok) {
+    throw new Error(`Failed to fetch script: ${firstResponse.statusText}`);
+  }
+
+  const firstPayload = (await parseResponseBody(firstResponse)) as {
+    item?: string;
+    meta?: { totalPages?: number };
+  };
+  const firstScript = decodeScriptItem(firstPayload?.item);
+  if (firstScript) {
+    scripts.push(firstScript);
+  }
+
+  const totalPages = firstPayload?.meta?.totalPages ?? 1;
+  for (let page = 1; page < totalPages; page += 1) {
+    const pageUrl = buildUrl(client.baseUrl, `/file-meta/${fileMetaId}/script`, {
+      limit,
+      page,
+    });
+    const pageResponse = await client.request(pageUrl);
+    if (!pageResponse.ok) {
+      throw new Error(`Failed to fetch script page ${page}: ${pageResponse.statusText}`);
+    }
+
+    const pagePayload = (await parseResponseBody(pageResponse)) as { item?: string };
+    const pageScript = decodeScriptItem(pagePayload?.item);
+    if (pageScript) {
+      scripts.push(pageScript);
+    }
+  }
+
+  return scripts;
+};
+
+const resolveTranscriptDerivedYouTubeUrl = (
+  scripts: unknown[],
+  boardId?: string
+): string | undefined => {
+  if (!boardId) {
+    return undefined;
+  }
+
+  return resolveSingleYouTubeUrl(scripts, boardId);
+};
+
+const buildCues = (scripts: unknown[], maxLineChars: number) => {
+  const normalizedSegments = scripts.flatMap((script) => normalizeSubtitleSegments(script));
+  return {
+    normalizedSegments,
+    cues: segmentSubtitleCues(normalizedSegments, { maxLineChars }),
+  };
 };
 
 export const createYoutubeHighlightClip = async (
@@ -545,7 +790,7 @@ export const createYoutubeHighlightClip = async (
     } else {
       logger.info({ url: args.youtubeUrl, path: videoPath }, "Downloading video");
       execSync(
-        `python -m yt_dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 -o "${videoPath}" "${args.youtubeUrl}"`,
+        `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 -o "${videoPath}" "${args.youtubeUrl}"`,
         { stdio: "inherit" }
       );
     }
@@ -668,77 +913,38 @@ export const createYoutubeFullSubtitledVideo = async (
 
     mkdirSync(outputDir, { recursive: true });
 
-    let fileMetaId = args.fileMetaId;
+    const { fileMetaId, boardYoutubeUrl } = await resolveBoardInputs(client, args);
+    const scripts = await fetchAllScriptPages(client, fileMetaId);
+    const transcriptYoutubeUrl = args.youtubeUrl
+      ? undefined
+      : resolveTranscriptDerivedYouTubeUrl(scripts, args.boardId);
+    const fallbackBoardYoutubeUrl =
+      !args.youtubeUrl && !transcriptYoutubeUrl && args.boardId && !boardYoutubeUrl
+        ? (await resolveBoardDerivedVideoSource(client, args.boardId)).youtubeUrl
+        : undefined;
+    const youtubeUrl =
+      args.youtubeUrl ?? transcriptYoutubeUrl ?? boardYoutubeUrl ?? fallbackBoardYoutubeUrl;
 
-    if (!fileMetaId && args.boardId) {
-      const boardUrl = buildUrl(client.baseUrl, `/boards/${args.boardId}`);
-      const boardResponse = await client.request(boardUrl);
-      if (!boardResponse.ok) {
-        throw new Error(`Failed to fetch board: ${boardResponse.statusText}`);
-      }
-      const boardData = (await parseResponseBody(boardResponse)) as {
-        fileMetaId?: string;
-        fileMeta?: Array<{ id?: string }>;
-      };
-      fileMetaId =
-        boardData.fileMetaId ||
-        (Array.isArray(boardData.fileMeta) ? boardData.fileMeta[0]?.id : undefined);
+    if (!youtubeUrl) {
+      throw new Error("Provide <youtubeUrl> or --board-id to resolve video source.");
     }
 
-    if (!fileMetaId) {
-      throw new Error("Could not determine fileMetaId from boardId.");
-    }
+    const { normalizedSegments, cues } = buildCues(scripts, subtitleMaxLineLength);
+    const srtContent = serializeSubtitleCues(cues, 0);
+    const srtFilename = "subtitles.srt";
+    const srtPath = resolve(outputDir, srtFilename);
+    writeFileSync(srtPath, srtContent, "utf-8");
+    logger.info({ path: srtPath, segments: normalizedSegments.length }, "Generated SRT");
 
-    const scripts: Record<string, unknown>[] = [];
-    const scriptUrl = buildUrl(client.baseUrl, `/file-meta/${fileMetaId}/script`, {
-      limit: 60,
-      page: 0,
-    });
-    const scriptResponse = await client.request(scriptUrl);
-    if (!scriptResponse.ok) {
-      throw new Error(`Failed to fetch script: ${scriptResponse.statusText}`);
-    }
-
-    const scriptPayload = (await parseResponseBody(scriptResponse)) as {
-      item?: string;
-      meta?: { totalPages?: number };
-    };
-    const firstScript = decodeScriptItem(scriptPayload?.item);
-    if (firstScript) {
-      scripts.push(firstScript);
-    }
-
-    const totalPages = scriptPayload?.meta?.totalPages ?? 1;
-    for (let page = 1; page < totalPages; page += 1) {
-      const pageUrl = buildUrl(client.baseUrl, `/file-meta/${fileMetaId}/script`, {
-        limit: 60,
-        page,
-      });
-      const pageResponse = await client.request(pageUrl);
-      if (!pageResponse.ok) {
-        throw new Error(`Failed to fetch script page ${page}: ${pageResponse.statusText}`);
-      }
-      const pagePayload = (await parseResponseBody(pageResponse)) as { item?: string };
-      const pageScript = decodeScriptItem(pagePayload?.item);
-      if (pageScript) {
-        scripts.push(pageScript);
-      }
-    }
-
-    const segments = scripts.flatMap((script) => extractSegmentsFromScript(script));
-    if (segments.length === 0) {
-      throw new Error("No segments found in script.");
-    }
-
-    const videoId = extractYouTubeId(args.youtubeUrl);
+    const videoId = extractYouTubeId(youtubeUrl);
     const videoFilename = videoId ? `video_${videoId}.mp4` : "video_full.mp4";
     const videoPath = resolve(outputDir, videoFilename);
     if (existsSync(videoPath)) {
       logger.info({ path: videoPath }, "Video already exists, skipping download");
     } else {
-      logger.info({ url: args.youtubeUrl, path: videoPath }, "Downloading video");
+      logger.info({ url: youtubeUrl, path: videoPath }, "Downloading video");
       execSync(
-        `python -m yt_dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 -o "${videoPath}" "${args.youtubeUrl}"`,
+        `yt-dlp -f "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" --merge-output-format mp4 -o "${videoPath}" "${youtubeUrl}"`,
         { stdio: "inherit" }
       );
     }
@@ -753,22 +959,9 @@ export const createYoutubeFullSubtitledVideo = async (
       .toString()
       .trim();
     const videoDuration = Number.parseFloat(durationOutput);
-    const maxSegmentEnd = segments.reduce(
-      (max, segment) => Math.max(max, segment.endTime),
-      0
-    );
-    const scaleNeeded =
-      Number.isFinite(videoDuration) &&
-      maxSegmentEnd > Math.max(videoDuration * 10, 10000)
-        ? 0.001
-        : 1;
-    const scaledSegmentsAll = applyTimeScale(segments, scaleNeeded);
-
-    const srtContent = generateSrt(scaledSegmentsAll, 0, subtitleMaxLineLength);
-    const srtFilename = "subtitles.srt";
-    const srtPath = resolve(outputDir, srtFilename);
-    writeFileSync(srtPath, srtContent, "utf-8");
-    logger.info({ path: srtPath, segments: scaledSegmentsAll.length }, "Generated SRT");
+    if (!Number.isFinite(videoDuration) || videoDuration <= 0) {
+      throw new Error("Failed to determine video duration.");
+    }
 
     const finalFilename = "video_with_subs.mp4";
     const finalPath = resolve(outputDir, finalFilename);
@@ -789,8 +982,8 @@ export const createYoutubeFullSubtitledVideo = async (
       videoPath,
       srtPath,
       finalPath,
-      segmentCount: scaledSegmentsAll.length,
-      timeScale: scaleNeeded,
+      segmentCount: normalizedSegments.length,
+      videoDuration,
       subtitleMaxLineLength,
     };
   } catch (error) {

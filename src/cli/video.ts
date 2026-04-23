@@ -4,6 +4,9 @@ import {
   createYoutubeFullSubtitledVideo,
   createYoutubeHighlightClip,
 } from "../handlers/video.js";
+import {
+  createYoutubeFullSubtitledVideoCommandSchema,
+} from "../schemas/video.js";
 import { writeJson, writeFilesWritten } from "./render/format.js";
 
 const splitCsv = (v: string) =>
@@ -62,7 +65,7 @@ export const registerVideoCommand = (
     });
 
   video
-    .command("subtitle <youtubeUrl>")
+    .command("subtitle [youtubeUrl]")
     .description("Burn full transcript subtitles into a YouTube video")
     .option("--board-id <id>", "board ID")
     .option("--file-meta <id>", "file metadata ID")
@@ -75,12 +78,20 @@ export const registerVideoCommand = (
     )
     .option("--json", "output JSON")
     .action(async (youtubeUrl, opts) => {
-      const data = (await createYoutubeFullSubtitledVideo(client, {
+      const args = createYoutubeFullSubtitledVideoCommandSchema.parse({
         youtubeUrl,
         boardId: opts.boardId,
         fileMetaId: opts.fileMeta,
         outputDir: opts.out,
         subtitleMaxLineLength: opts.maxLine,
+      });
+
+      const data = (await createYoutubeFullSubtitledVideo(client, {
+        youtubeUrl: args.youtubeUrl as string,
+        boardId: args.boardId,
+        fileMetaId: args.fileMetaId,
+        outputDir: args.outputDir,
+        subtitleMaxLineLength: args.subtitleMaxLineLength,
       })) as Record<string, unknown>;
 
       if (opts.json) return writeJson(data);
