@@ -16,14 +16,14 @@ import {
   CreateYoutubeFullSubtitledVideoArgs,
 } from "../schemas/video.js";
 
-type ScriptSegment = {
+export type ScriptSegment = {
   text: string;
   startTime: number;
   endTime: number;
   tokens: KaraokeToken[];
 };
 
-const extractSegmentsFromScript = (script: Record<string, unknown>): ScriptSegment[] => {
+export const extractSegmentsFromScript = (script: Record<string, unknown>): ScriptSegment[] => {
   const segments: ScriptSegment[] = [];
   const editorState = script.editorState as
     | { root?: { children?: Array<Record<string, unknown>> } }
@@ -105,7 +105,7 @@ const normalizeKeywords = (value: unknown): string[] => {
   return result;
 };
 
-const extractYouTubeId = (url: string): string | null => {
+export const extractYouTubeId = (url: string): string | null => {
   try {
     const parsed = new URL(url);
     const hostname = parsed.hostname.replace(/^www\./, "");
@@ -227,7 +227,7 @@ const collectYouTubeUrlCandidates = (
   }
 };
 
-const resolveSingleYouTubeUrl = (value: unknown, boardId: string): string | undefined => {
+export const resolveSingleYouTubeUrl = (value: unknown, boardId: string): string | undefined => {
   const candidates = new Set<string>();
   collectYouTubeUrlCandidates(value, candidates);
   const youtubeUrls = sortYouTubeUrlCandidates(candidates);
@@ -616,7 +616,7 @@ const resolveBoardInputs = async (
   return { fileMetaId, boardYoutubeUrl };
 };
 
-const fetchAllScriptPages = async (
+export const fetchAllScriptPages = async (
   client: DagloApiClient,
   fileMetaId: string,
   limit = 60

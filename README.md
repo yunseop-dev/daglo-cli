@@ -40,7 +40,7 @@ Tokens cache to `~/.config/daglo/credentials.json` (file mode `0600`, dir mode `
 | file-meta | `daglo file-meta keywords` | Keywords for a file or shared board |
 | obsidian | `daglo obsidian export <boardId>` | Single-board Obsidian export |
 | video | `daglo video clip <url>` | YouTube highlight clip with burned subtitles |
-| video | `daglo video subtitle <url>` | Full subtitled video |
+| video | `daglo video subtitle [youtubeUrl]` | Full subtitled video |
 
 Run `daglo <group> --help` for per-command options.
 
@@ -67,6 +67,28 @@ This makes `daglo board list --json | jq` pipe cleanly.
 
 Install both and ensure they're on `PATH` before using video commands.
 
+## HyperFrames Prototype
+
+```bash
+npm run hyperframes:building-pi
+```
+
+This generates a standalone HyperFrames project under `docs/hyperframes/building-pi/` using the included test board artifacts:
+
+- `Building pi in a World of Slop — Mario Zechner.json`
+- `2026-04-20-Building-pi-in-a-World-of-Slop-Mario-Zechner.txt`
+- `latest-board-video.mp4`
+
+The generator also accepts Daglo transcript JSON when you have a JSON export handy; the checked-in test board uses the plain-text transcript artifact in this repo.
+
+The generator writes:
+
+- `index.html` — HyperFrames composition
+- `DESIGN.md` — palette + typography contract
+- `README.md` — render instructions
+- `assets/manifest.json` — derived metadata
+- `assets/source-audio.mp3` and `assets/screenshots/` when FFmpeg can sample the source video
+
 ## Configuration
 
 - `DAGLO_EMAIL` / `DAGLO_PASSWORD` — fallback credentials for re-auth
@@ -81,6 +103,22 @@ npm run test:ui
 npm run build       # tsc + chmod +x dist/cli.js
 npm link            # register `daglo` for local testing
 ```
+
+## CLI Smoke Verification
+
+```bash
+npm run smoke:board-cli
+```
+
+This keeps the task-8 smoke contract pinned to the built `dist/cli.js` binary and verifies:
+
+- board-id happy path → leaves `video_<id>.mp4`, `subtitles.srt`, and `video_with_subs.mp4` under `.sisyphus/evidence/task-8-board/`
+- board-id happy path log is refreshed at `.sisyphus/evidence/task-8-board.log`
+- built CLI direct URL + `--file-meta` regression smoke leaves artifacts under `.sisyphus/evidence/task-8-direct-url-file-meta/`
+- built CLI smoke logs stay under `.sisyphus/evidence/task-8-cli-smoke/` and include the latest stderr/stdout snapshots plus ffprobe evidence
+- board-id failure paths for multiple YouTube URLs, no resolvable YouTube URL, and empty transcript all fail via built CLI before writing media artifacts
+- `--file-meta` only → schema rejection message from the built CLI
+- task-6 verification artifacts remain under `.sisyphus/evidence/task-6-board-subtitle/` and are not repurposed by `npm run smoke:board-cli`
 
 ## License
 

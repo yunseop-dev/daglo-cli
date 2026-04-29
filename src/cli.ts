@@ -8,6 +8,7 @@ import { registerFolderCommand } from "./cli/folder.js";
 import { registerFileMetaCommand } from "./cli/file-meta.js";
 import { registerObsidianCommand } from "./cli/obsidian.js";
 import { registerVideoCommand } from "./cli/video.js";
+import { registerHyperframesCommand } from "./cli/hyperframes.js";
 import { logger } from "./logger.js";
 import { writeError } from "./cli/render/format.js";
 
@@ -34,6 +35,7 @@ registerFolderCommand(program, client);
 registerFileMetaCommand(program, client);
 registerObsidianCommand(program, client);
 registerVideoCommand(program, client);
+registerHyperframesCommand(program, client);
 
 program.parseAsync(process.argv).catch((err: Error) => {
   writeError(err.message);

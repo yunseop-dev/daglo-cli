@@ -6,3 +6,5 @@ dist/
 .env.local
 .code
 .worktrees/
+.a5c/
+.claude/settings.local.json
