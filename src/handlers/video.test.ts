@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DagloApiClient } from "../api/client.js";
 import {
+  buildCues,
   createYoutubeHighlightClip,
   createYoutubeFullSubtitledVideo,
   resolveBoardDerivedVideoSource,
@@ -724,5 +725,48 @@ describe("createYoutubeFullSubtitledVideo", () => {
     );
     expect(execSyncMock).toHaveBeenCalledTimes(3);
     expect(execSyncMock.mock.calls[2]?.[0]).toContain("ffmpeg -y -i");
+  });
+});
+
+describe("buildCues", () => {
+  const makeScript = (tokens: Array<{ text: string; s: number; e: number }>) => ({
+    editorState: {
+      root: {
+        children: [
+          {
+            children: tokens.map((token) => ({ type: "karaoke", ...token })),
+          },
+        ],
+      },
+    },
+  });
+
+  it("deduplicates overlapping script pages so the transcript is not doubled", () => {
+    // Two pages where the second repeats the first's content with identical timestamps —
+    // exactly the Daglo paginated-script behavior that doubled the burned-in subtitles.
+    const page = makeScript([
+      { text: "A hundred million dollars. ", s: 12.7, e: 14.2 },
+      { text: "Would you take it? ", s: 14.8, e: 17.5 },
+      { text: "We will survive. ", s: 17.6, e: 19.5 },
+    ]);
+
+    const { cues } = buildCues([page, page], 42);
+    const joined = cues.map((cue) => cue.text.replace(/\n/g, " ")).join(" ");
+
+    expect(joined).toContain("A hundred million dollars.");
+    // The phrase must appear exactly once, not once per duplicated page.
+    expect(joined.match(/A hundred million dollars\./g)).toHaveLength(1);
+  });
+
+  it("keeps genuinely repeated phrases that carry distinct timestamps", () => {
+    const script = makeScript([
+      { text: "I can do better. ", s: 1.6, e: 2.4 },
+      { text: "I can do better. ", s: 3.2, e: 4.0 },
+    ]);
+
+    const { cues } = buildCues([script], 42);
+    const joined = cues.map((cue) => cue.text.replace(/\n/g, " ")).join(" ");
+
+    expect(joined.match(/I can do better\./g)).toHaveLength(2);
   });
 });

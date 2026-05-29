@@ -63,6 +63,10 @@ const TARGET_CPS = 16;
 const SOFT_MAX_CPS = 17;
 const HARD_MAX_CPS = 20;
 const DEFAULT_MAX_LINE_CHARS = 42;
+// Once a cue's left side ends a sentence and is at least this long, prefer to end the cue
+// there rather than packing the next sentence in. Keeps fast, word-level transcripts aligned
+// to sentence boundaries instead of arbitrary 84-character blocks.
+const SENTENCE_BREAK_MIN_CHARS = 20;
 const SENTENCE_PUNCTUATION_REGEX = /[.?!。！？]/;
 const SENTENCE_END_REGEX = /[.?!。！？]\s*$/;
 const SECONDARY_CONJUNCTION_REGEX =
@@ -401,11 +405,16 @@ const endsWithSentencePunctuation = (text: string): boolean => {
   return SENTENCE_END_REGEX.test(normalizeCueWhitespace(text));
 };
 
-const isCueWithinHardLimits = (fragment: CueFragment, maxLineChars = DEFAULT_MAX_LINE_CHARS): boolean => {
-  const duration = getCueDuration(fragment);
-  if (duration > MAX_CUE_DURATION_SEC) return false;
+// Structural limits only — character count, line count, and duration. Reading speed (cps) is
+// deliberately excluded: splitting a too-fast cue cannot lower its cps (each piece keeps a
+// proportional slice of the duration), so treating cps as a hard limit here would recurse a
+// short word down to single characters. cps is handled as a preference during merging instead.
+const isCueWithinStructuralLimits = (
+  fragment: CueFragment,
+  maxLineChars = DEFAULT_MAX_LINE_CHARS
+): boolean => {
+  if (getCueDuration(fragment) > MAX_CUE_DURATION_SEC) return false;
   if (getCueCharCount(fragment.speakerLabel, fragment.text) > MAX_CUE_CHARS) return false;
-  if (getCueCps(fragment.speakerLabel, fragment.text, duration) > HARD_MAX_CPS) return false;
   if (wrapCueText(fragment.speakerLabel, fragment.text, maxLineChars).length > MAX_CUE_LINES) return false;
   return true;
 };
@@ -508,7 +517,7 @@ const splitTextRecursively = (
   };
 
   if (normalizedText.length <= 1) return [normalizedText];
-  if (isCueWithinHardLimits(probe, maxLineChars)) return [normalizedText];
+  if (isCueWithinStructuralLimits(probe, maxLineChars)) return [normalizedText];
 
   const splitIndex = pickSplitIndex(normalizedText, speakerLabel, duration);
   let leftText = normalizeCueWhitespace(normalizedText.slice(0, splitIndex));
@@ -582,18 +591,20 @@ const shouldMergeFragments = (left: CueFragment, right: CueFragment, maxLineChar
   if (!isSameSpeaker(left, right)) return false;
 
   const merged = mergeFragments(left, right);
-  if (!isCueWithinHardLimits(merged, maxLineChars)) return false;
+  if (!isCueWithinStructuralLimits(merged, maxLineChars)) return false;
 
-  const leftDuration = getCueDuration(left);
-  const rightDuration = getCueDuration(right);
-  const leftCps = getCueCps(left.speakerLabel, left.text, leftDuration);
-  const rightCps = getCueCps(right.speakerLabel, right.text, rightDuration);
-  const mergedCps = getCueCps(merged.speakerLabel, merged.text, getCueDuration(merged));
+  // Prefer to end the cue at a sentence boundary once the left side reads on its own. Without
+  // this, word-level transcripts pack into arbitrary 84-character blocks that cut mid-sentence.
+  if (
+    endsWithSentencePunctuation(left.text) &&
+    getCueCharCount(left.speakerLabel, left.text) >= SENTENCE_BREAK_MIN_CHARS
+  ) {
+    return false;
+  }
 
-  if (leftDuration < MIN_CUE_DURATION_SEC || rightDuration < MIN_CUE_DURATION_SEC) return true;
-  if (leftCps > HARD_MAX_CPS || rightCps > HARD_MAX_CPS) return true;
-
-  return mergedCps <= SOFT_MAX_CPS && (leftCps > SOFT_MAX_CPS || rightCps > SOFT_MAX_CPS);
+  // Otherwise pack greedily up to the structural limits. This rebuilds readable cues from the
+  // many short fragments produced by token-level (per-word) transcripts.
+  return true;
 };
 
 const enforceMinDuration = (fragments: CueFragment[]): CueFragment[] => {

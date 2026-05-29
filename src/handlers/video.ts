@@ -673,8 +673,24 @@ const resolveTranscriptDerivedYouTubeUrl = (
   return resolveSingleYouTubeUrl(scripts, boardId);
 };
 
-const buildCues = (scripts: unknown[], maxLineChars: number) => {
-  const normalizedSegments = scripts.flatMap((script) => normalizeSubtitleSegments(script));
+// The Daglo script API can return overlapping pages — each page may contain the full (or a
+// leading slice of the) transcript, so naively concatenating pages duplicates every cue. We
+// dedupe on the exact (start, end, speaker, text) tuple, which removes those duplicates while
+// preserving genuinely repeated phrases (they carry distinct timestamps). The result is sorted
+// by start time so segmentSubtitleCues sees a single, ordered pass.
+export const buildCues = (scripts: unknown[], maxLineChars: number) => {
+  const seen = new Set<string>();
+  const normalizedSegments = scripts
+    .flatMap((script) => normalizeSubtitleSegments(script))
+    .filter((segment) => {
+      const key = `${segment.startSec}|${segment.endSec}|${segment.speakerKey ?? ""}|${segment.text}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) =>
+      left.startSec !== right.startSec ? left.startSec - right.startSec : left.endSec - right.endSec
+    );
   return {
     normalizedSegments,
     cues: segmentSubtitleCues(normalizedSegments, { maxLineChars }),

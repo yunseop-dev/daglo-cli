@@ -320,6 +320,30 @@ describe("segmentSubtitleCues", () => {
     cues.forEach(expectCueLimits);
   });
 
+  it("rebuilds readable cues from fast word-level tokens instead of shattering into characters", () => {
+    // Each token is a single fast-spoken word (~0.1-0.2s). A naive cps hard limit would split
+    // every word down to single characters; cues must instead pack words into sentences.
+    const words = "What made you build. Zeke, I can do better. I can do better than C++.".split(" ");
+    let cursor = 0.1;
+    const segments = normalizeSubtitleSegments(
+      words.map((word) => {
+        const startSec = cursor;
+        const endSec = cursor + 0.15;
+        cursor = endSec;
+        return { text: word, startTime: startSec, endTime: endSec };
+      })
+    );
+
+    const cues = segmentSubtitleCues(segments, { maxLineChars: 42 });
+
+    expect(cues.length).toBeGreaterThan(0);
+    expect(cues.every((cue) => cue.text.replace(/\n/g, "").length > 1)).toBe(true);
+    expect(cues.map((cue) => cue.text.replace(/\n/g, " ")).join(" ")).toBe(
+      "What made you build. Zeke, I can do better. I can do better than C++."
+    );
+    expect(cues.slice(0, -1).every((cue) => /[.?!]$/.test(cue.text.replace(/\n/g, "")))).toBe(true);
+  });
+
   it("splits cues once the readable boundary exceeds 84 visible characters", () => {
     const overBoundaryText = "가".repeat(85);
     const segments = normalizeSubtitleSegments([
