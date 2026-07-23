@@ -42,6 +42,7 @@ export interface TranscribeFileResult {
 
 export interface TranscribeResult {
   boardId?: string;
+  folderId?: string;
   fileMetaIds: string[];
   files: TranscribeFileResult[];
   options: Required<UserTranscriptionOption>;
@@ -85,6 +86,42 @@ const fetchUserTranscriptionOption = async (
   } catch {
     return {};
   }
+};
+
+/** Resolve a folder name or id to a folder id via GET /folders. */
+const resolveFolderId = async (
+  client: DagloApiClient,
+  headers: WorkspaceHeaders,
+  folder: string
+): Promise<string> => {
+  const response = await client.request("/folders?includeRoot=true", { headers });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch folders: ${response.statusText}`);
+  }
+
+  const payload = (await response.json()) as unknown;
+  const folders = (Array.isArray(payload) ? payload : []) as Array<{
+    id?: string;
+    name?: string;
+  }>;
+
+  // Exact id match takes precedence, then exact name match.
+  const byId = folders.find((f) => f.id === folder);
+  if (byId?.id) return byId.id;
+
+  const byName = folders.filter((f) => f.name === folder && f.id);
+  if (byName.length === 1) return byName[0].id as string;
+  if (byName.length > 1) {
+    throw new Error(
+      `Multiple folders named "${folder}". Use the folder id instead.`
+    );
+  }
+
+  const available = folders
+    .map((f) => f.name)
+    .filter((n): n is string => Boolean(n))
+    .join(", ");
+  throw new Error(`Folder not found: "${folder}". Available folders: ${available}`);
 };
 
 /** Step 1: create a file slot and obtain a GCS resumable signed URL. */
@@ -163,18 +200,22 @@ const requestTranscription = async (
   client: DagloApiClient,
   headers: WorkspaceHeaders,
   fileMetaIds: string[],
-  options: Required<UserTranscriptionOption>
+  options: Required<UserTranscriptionOption>,
+  folderId?: string
 ): Promise<void> => {
+  const body: Record<string, unknown> = {
+    language: options.language,
+    useSpeakerDiarization: options.useSpeakerDiarization,
+    topic: options.topic,
+    useDictionary: options.useDictionary,
+    fileMetaIds,
+  };
+  if (folderId) body.folderId = folderId;
+
   const response = await client.request("/transcript-request", {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      language: options.language,
-      useSpeakerDiarization: options.useSpeakerDiarization,
-      topic: options.topic,
-      useDictionary: options.useDictionary,
-      fileMetaIds,
-    }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     throw new Error(`Failed to request transcription: ${response.statusText}`);
@@ -270,6 +311,11 @@ export const transcribeFiles = async (
     platform: "web",
   };
 
+  // Resolve the target folder (name or id) up front, before uploading.
+  const folderId = args.folder
+    ? await resolveFolderId(client, headers, args.folder)
+    : undefined;
+
   // Resolve options: account defaults, overridden by explicit flags.
   const saved = await fetchUserTranscriptionOption(client, headers);
   const options: Required<UserTranscriptionOption> = {
@@ -300,7 +346,7 @@ export const transcribeFiles = async (
   }
 
   const fileMetaIds = files.map((f) => f.fileMetaId);
-  await requestTranscription(client, headers, fileMetaIds, options);
+  await requestTranscription(client, headers, fileMetaIds, options, folderId);
 
   const boardId = await findBoardId(
     client,
@@ -309,5 +355,5 @@ export const transcribeFiles = async (
     Math.max(10, fileMetaIds.length)
   );
 
-  return { boardId, fileMetaIds, files, options };
+  return { boardId, folderId, fileMetaIds, files, options };
 };

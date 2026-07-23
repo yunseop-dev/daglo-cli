@@ -18,6 +18,7 @@ export const registerTranscribeCommand = (
     .option("--no-speaker", "disable speaker diarization")
     .option("--dictionary", "use custom dictionary/glossary (default: account setting)")
     .option("--no-dictionary", "do not use custom dictionary/glossary")
+    .option("--folder <name|id>", "target folder name or id (default: 기본 폴더)")
     .option("--json", "output JSON")
     .action(async (files: string[], opts) => {
       const args = transcribeSchema.parse({
@@ -26,6 +27,7 @@ export const registerTranscribeCommand = (
         topic: opts.topic,
         useSpeakerDiarization: opts.speaker,
         useDictionary: opts.dictionary,
+        folder: opts.folder,
       });
 
       const result = await transcribeFiles(client, args);
@@ -45,6 +47,9 @@ export const registerTranscribeCommand = (
         ? `Transcription requested — boardId ${result.boardId} (${result.fileMetaIds.length} file(s))`
         : `Transcription requested for ${result.fileMetaIds.length} file(s)`;
       writeSuccess(summary);
+      if (result.folderId) {
+        writeSuccess(`Folder: ${result.folderId}`);
+      }
       writeSuccess(
         `Options: language=${result.options.language}, topic=${result.options.topic}, ` +
           `speaker=${result.options.useSpeakerDiarization}, dictionary=${result.options.useDictionary}`

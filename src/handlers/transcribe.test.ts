@@ -25,6 +25,15 @@ const routeFetch = (overrides: Record<string, any> = {}) => {
     if (url.endsWith("/workspaces")) {
       return { ok: true, json: async () => [{ id: "ws-uuid", isDefault: true }] };
     }
+    if (url.includes("/folders")) {
+      return {
+        ok: true,
+        json: async () => [
+          { id: "folder-root", name: "기본 폴더", isRoot: true },
+          { id: "folder-backlog", name: "밀린받아쓰기" },
+        ],
+      };
+    }
     if (url.endsWith("/user-option/transcription")) {
       return {
         ok: true,
@@ -162,5 +171,51 @@ describe("transcribeFiles", () => {
     await expect(transcribeFiles(client, { files: ["missing.mp3"] })).rejects.toThrow(
       "File not found: missing.mp3"
     );
+  });
+
+  it("resolves a folder name to its id and includes folderId in transcript-request", async () => {
+    routeFetch();
+    const client = new DagloApiClient();
+    const result = await transcribeFiles(client, {
+      files: ["a.mp3"],
+      folder: "밀린받아쓰기",
+    });
+
+    expect(result.folderId).toBe("folder-backlog");
+    const trCall = (global.fetch as any).mock.calls.find((c: any[]) =>
+      c[0].endsWith("/transcript-request")
+    );
+    expect(JSON.parse(trCall[1].body).folderId).toBe("folder-backlog");
+  });
+
+  it("accepts a folder id directly", async () => {
+    routeFetch();
+    const client = new DagloApiClient();
+    const result = await transcribeFiles(client, {
+      files: ["a.mp3"],
+      folder: "folder-backlog",
+    });
+
+    expect(result.folderId).toBe("folder-backlog");
+  });
+
+  it("omits folderId when no folder is given", async () => {
+    routeFetch();
+    const client = new DagloApiClient();
+    await transcribeFiles(client, { files: ["a.mp3"] });
+
+    const trCall = (global.fetch as any).mock.calls.find((c: any[]) =>
+      c[0].endsWith("/transcript-request")
+    );
+    expect(JSON.parse(trCall[1].body)).not.toHaveProperty("folderId");
+  });
+
+  it("throws with available folders when the folder is not found", async () => {
+    routeFetch();
+    const client = new DagloApiClient();
+
+    await expect(
+      transcribeFiles(client, { files: ["a.mp3"], folder: "없는폴더" })
+    ).rejects.toThrow(/Folder not found: "없는폴더".*밀린받아쓰기/s);
   });
 });

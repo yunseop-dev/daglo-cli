@@ -21,6 +21,10 @@ export const transcribeSchema = z.object({
     .boolean()
     .optional()
     .describe("Use custom dictionary/glossary (default: account setting)"),
+  folder: z
+    .string()
+    .optional()
+    .describe("Target folder name or id (default: 기본 폴더)"),
 });
 
 export type TranscribeArgs = z.infer<typeof transcribeSchema>;
